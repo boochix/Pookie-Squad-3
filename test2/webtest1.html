@@ -39,7 +39,7 @@ canvas { background:#fff; border-radius:10px; max-width:100%; }
 
   <div class="card" style="grid-column:1/-1;">
     <h3>Live Video (MJPEG 720p)</h3>
-    <img id="videoStream" src="http://10.1.16.205:8080/video" alt="Video Stream"/>
+    <img id="videoStream" src="http://100.83.127.9:8080/video" alt="Video Stream"/>
   </div>
 
   <div class="card" style="grid-column:1/-1;">
@@ -50,22 +50,23 @@ canvas { background:#fff; border-radius:10px; max-width:100%; }
 
 <script>
 const MAX_POINTS = 100;
-const dt = 0.2; // 200ms
+const GPS_POINTS = 500; 
+const dt = 0.2;
 let startTime = Date.now();
 
 // Acceleration data
 let accelData = {Ax:[], Ay:[], Az:[]};
+let accelBuffer = [];
+const ACCEL_WINDOW = 10;
 
 // Speed data
 let speedData = [];
 let imuSpeed = 0;
+let smoothSpeed = 0;
 let lastGps = null;
 let lastTime = null;
-const alpha = 0.8;
-
-// Activity detection buffer
-const accelWindow = 10; // last 10 samples
-let accelBuffer = [];
+const alpha = 0.8; 
+const beta = 0.2;  
 
 // Charts
 const accelChart = new Chart(document.getElementById('accelChart'), {
@@ -90,58 +91,46 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 })
 const polyline = L.polyline([], {color:'blue'}).addTo(map);
 
 function computeActivity(speed, accelBuf){
-    // Compute variance of acceleration
     let n = accelBuf.length;
-    if(n === 0) return "-";
-
+    if(n===0) return "-";
     let mean = [0,0,0];
     accelBuf.forEach(a=>{ mean[0]+=a[0]; mean[1]+=a[1]; mean[2]+=a[2]; });
     mean = mean.map(m=>m/n);
-
     let varAcc = [0,0,0];
-    accelBuf.forEach(a=>{ 
-        varAcc[0] += (a[0]-mean[0])**2;
-        varAcc[1] += (a[1]-mean[1])**2;
-        varAcc[2] += (a[2]-mean[2])**2;
-    });
+    accelBuf.forEach(a=>{ varAcc[0]+=(a[0]-mean[0])**2; varAcc[1]+=(a[1]-mean[1])**2; varAcc[2]+=(a[2]-mean[2])**2; });
     varAcc = varAcc.map(v=>v/n);
     let totalVar = varAcc[0]+varAcc[1]+varAcc[2];
-
-    // Thresholds (tweak if needed)
     if(speed < 0.5) return "Standing";
     if(speed >= 0.5 && speed < 3 && totalVar>0.1) return "Walking";
     if(speed >= 3 || totalVar<0.1) return "Scooter/Vehicle";
     return "-";
 }
 
+let lastChartUpdate = 0;
+
 function updateDashboard(){
     const now = (Date.now()-startTime)/1000;
 
-    // --- Acceleration ---
-    fetch('http://10.1.16.205:8080/sensors.json')
+    // Acceleration
+    fetch('http://100.83.127.9:8080/sensors.json')
     .then(res=>res.json())
     .then(sensors=>{
         const la = sensors.lin_accel.data.slice(-1)[0];
         const vals = la[1];
-
-        // Integrate IMU speed
         imuSpeed += vals[0]*dt;
 
-        // Update buffer for activity
         accelBuffer.push(vals);
-        if(accelBuffer.length>accelWindow) accelBuffer.shift();
+        if(accelBuffer.length>ACCEL_WINDOW) accelBuffer.shift();
 
         ['Ax','Ay','Az'].forEach((axis,i)=>{
             accelData[axis].push({x:now, y:vals[i]});
             document.getElementById(axis+'Val').innerText = vals[i].toFixed(2);
             if(accelData[axis].length>MAX_POINTS) accelData[axis].shift();
-            accelChart.data.datasets[i].data = accelData[axis];
         });
-        accelChart.update();
-    }).catch(err=>console.log(err));
+    }).catch(err=>console.log('Accel fetch error', err));
 
-    // --- GPS / Speed ---
-    fetch('http://10.1.16.205:8080/gps.json')
+    // GPS / Speed
+    fetch('http://100.83.127.9:8080/gps.json')
     .then(res=>res.json())
     .then(gps=>{
         const lat = gps.gps.latitude;
@@ -149,6 +138,7 @@ function updateDashboard(){
         const ts = Date.now()/1000;
 
         polyline.addLatLng([lat,lng]);
+        if(polyline.getLatLngs().length>GPS_POINTS) polyline.getLatLngs().shift();
         map.setView([lat,lng], map.getZoom());
 
         let gpsSpeed = 0;
@@ -166,32 +156,46 @@ function updateDashboard(){
         lastGps = {lat,lng};
         lastTime = ts;
 
-        // Complementary filter
-        let combinedSpeed = alpha*gpsSpeed + (1-alpha)*imuSpeed;
-        combinedSpeed = Math.max(0, combinedSpeed);
-        imuSpeed = combinedSpeed;
+        let combinedSpeed;
+        if(gpsSpeed > 0.5){
+            combinedSpeed = alpha*gpsSpeed + (1-alpha)*imuSpeed;
+        } else {
+            combinedSpeed = gpsSpeed;
+        }
+        smoothSpeed = beta*combinedSpeed + (1-beta)*smoothSpeed;
+        smoothSpeed = Math.max(0, smoothSpeed);
+        imuSpeed = smoothSpeed;
 
-        speedData.push({x:now, y:combinedSpeed});
+        speedData.push({x:now, y:smoothSpeed});
         if(speedData.length>MAX_POINTS) speedData.shift();
-        speedChart.data.datasets[0].data = speedData;
-        speedChart.update();
 
-        document.getElementById('currentSpeed').innerText = combinedSpeed.toFixed(2);
-
-        // Activity
-        const activity = computeActivity(combinedSpeed, accelBuffer);
+        document.getElementById('currentSpeed').innerText = smoothSpeed.toFixed(2);
+        const activity = computeActivity(smoothSpeed, accelBuffer);
         document.getElementById('activity').innerText = "Activity: " + activity;
+
+        if(Date.now() - lastChartUpdate > 500){
+            accelChart.data.datasets.forEach((ds,i)=>ds.data = accelData[['Ax','Ay','Az'][i]]);
+            accelChart.update();
+            speedChart.data.datasets[0].data = speedData;
+            speedChart.update();
+            lastChartUpdate = Date.now();
+        }
 
     }).catch(err=>{
-        let combinedSpeed = Math.max(0, imuSpeed);
-        speedData.push({x:now, y:combinedSpeed});
+        smoothSpeed = Math.max(0, imuSpeed);
+        speedData.push({x:now, y:smoothSpeed});
         if(speedData.length>MAX_POINTS) speedData.shift();
-        speedChart.data.datasets[0].data = speedData;
-        speedChart.update();
-        document.getElementById('currentSpeed').innerText = combinedSpeed.toFixed(2);
-
-        const activity = computeActivity(combinedSpeed, accelBuffer);
+        document.getElementById('currentSpeed').innerText = smoothSpeed.toFixed(2);
+        const activity = computeActivity(smoothSpeed, accelBuffer);
         document.getElementById('activity').innerText = "Activity: " + activity;
+
+        if(Date.now() - lastChartUpdate > 500){
+            accelChart.data.datasets.forEach((ds,i)=>ds.data = accelData[['Ax','Ay','Az'][i]]);
+            accelChart.update();
+            speedChart.data.datasets[0].data = speedData;
+            speedChart.update();
+            lastChartUpdate = Date.now();
+        }
     });
 }
 
