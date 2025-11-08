@@ -14,8 +14,9 @@ header { background:#4a90e2; color:white; padding:15px; text-align:center; font-
 h3 { margin:10px 0; }
 canvas { background:#fff; border-radius:10px; max-width:100%; }
 #map { height:400px; width:100%; border-radius:10px; }
-#videoStream { width:100%; max-height:400px; border-radius:10px; object-fit:cover; }
+#videoStream { width: 100%; max-width: 1280px; border-radius: 10px; object-fit: contain; aspect-ratio: 16/9; background: #000; }
 .value { font-size:18px; margin-bottom:10px; font-weight:bold; }
+#activity { font-size:20px; font-weight:bold; color:#333; margin-top:10px; }
 </style>
 </head>
 <body>
@@ -32,11 +33,12 @@ canvas { background:#fff; border-radius:10px; max-width:100%; }
   <div class="card">
     <h3>Speed (m/s)</h3>
     <div class="value">Current: <span id="currentSpeed">0</span></div>
+    <div id="activity">Activity: -</div>
     <canvas id="speedChart"></canvas>
   </div>
 
   <div class="card" style="grid-column:1/-1;">
-    <h3>Live Video</h3>
+    <h3>Live Video (MJPEG 720p)</h3>
     <img id="videoStream" src="http://10.1.16.205:8080/video" alt="Video Stream"/>
   </div>
 
@@ -48,7 +50,7 @@ canvas { background:#fff; border-radius:10px; max-width:100%; }
 
 <script>
 const MAX_POINTS = 100;
-const dt = 0.2; // 200ms update interval
+const dt = 0.2; // 200ms
 let startTime = Date.now();
 
 // Acceleration data
@@ -56,12 +58,16 @@ let accelData = {Ax:[], Ay:[], Az:[]};
 
 // Speed data
 let speedData = [];
-let imuSpeed = 0;       // Integrated speed from IMU
+let imuSpeed = 0;
 let lastGps = null;
 let lastTime = null;
-const alpha = 0.8;      // GPS weight
+const alpha = 0.8;
 
-// Acceleration chart
+// Activity detection buffer
+const accelWindow = 10; // last 10 samples
+let accelBuffer = [];
+
+// Charts
 const accelChart = new Chart(document.getElementById('accelChart'), {
     type:'line',
     data:{datasets:[
@@ -72,7 +78,6 @@ const accelChart = new Chart(document.getElementById('accelChart'), {
     options:{animation:false, parsing:false, scales:{x:{type:'linear', title:{display:true,text:'Time (s)'}}, y:{title:{display:true,text:'m/s²'}}}}
 });
 
-// Speed chart
 const speedChart = new Chart(document.getElementById('speedChart'), {
     type:'line',
     data:{datasets:[{label:'Speed', borderColor:'orange', data:[]}]},
@@ -84,6 +89,31 @@ const map = L.map('map').setView([12.86164141, 77.66460835], 15);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
 const polyline = L.polyline([], {color:'blue'}).addTo(map);
 
+function computeActivity(speed, accelBuf){
+    // Compute variance of acceleration
+    let n = accelBuf.length;
+    if(n === 0) return "-";
+
+    let mean = [0,0,0];
+    accelBuf.forEach(a=>{ mean[0]+=a[0]; mean[1]+=a[1]; mean[2]+=a[2]; });
+    mean = mean.map(m=>m/n);
+
+    let varAcc = [0,0,0];
+    accelBuf.forEach(a=>{ 
+        varAcc[0] += (a[0]-mean[0])**2;
+        varAcc[1] += (a[1]-mean[1])**2;
+        varAcc[2] += (a[2]-mean[2])**2;
+    });
+    varAcc = varAcc.map(v=>v/n);
+    let totalVar = varAcc[0]+varAcc[1]+varAcc[2];
+
+    // Thresholds (tweak if needed)
+    if(speed < 0.5) return "Standing";
+    if(speed >= 0.5 && speed < 3 && totalVar>0.1) return "Walking";
+    if(speed >= 3 || totalVar<0.1) return "Scooter/Vehicle";
+    return "-";
+}
+
 function updateDashboard(){
     const now = (Date.now()-startTime)/1000;
 
@@ -94,8 +124,12 @@ function updateDashboard(){
         const la = sensors.lin_accel.data.slice(-1)[0];
         const vals = la[1];
 
-        // Integrate IMU speed using Ax (forward acceleration)
-        imuSpeed += vals[0] * dt;
+        // Integrate IMU speed
+        imuSpeed += vals[0]*dt;
+
+        // Update buffer for activity
+        accelBuffer.push(vals);
+        if(accelBuffer.length>accelWindow) accelBuffer.shift();
 
         ['Ax','Ay','Az'].forEach((axis,i)=>{
             accelData[axis].push({x:now, y:vals[i]});
@@ -132,26 +166,32 @@ function updateDashboard(){
         lastGps = {lat,lng};
         lastTime = ts;
 
-        // Complementary filter: combine GPS and IMU speed
+        // Complementary filter
         let combinedSpeed = alpha*gpsSpeed + (1-alpha)*imuSpeed;
-        combinedSpeed = Math.max(0, combinedSpeed); // always positive
-        imuSpeed = combinedSpeed; // reset IMU speed to corrected value
+        combinedSpeed = Math.max(0, combinedSpeed);
+        imuSpeed = combinedSpeed;
 
-        // Update chart
         speedData.push({x:now, y:combinedSpeed});
         if(speedData.length>MAX_POINTS) speedData.shift();
         speedChart.data.datasets[0].data = speedData;
         speedChart.update();
 
         document.getElementById('currentSpeed').innerText = combinedSpeed.toFixed(2);
+
+        // Activity
+        const activity = computeActivity(combinedSpeed, accelBuffer);
+        document.getElementById('activity').innerText = "Activity: " + activity;
+
     }).catch(err=>{
-        // If GPS fails, fallback to IMU
         let combinedSpeed = Math.max(0, imuSpeed);
         speedData.push({x:now, y:combinedSpeed});
         if(speedData.length>MAX_POINTS) speedData.shift();
         speedChart.data.datasets[0].data = speedData;
         speedChart.update();
         document.getElementById('currentSpeed').innerText = combinedSpeed.toFixed(2);
+
+        const activity = computeActivity(combinedSpeed, accelBuffer);
+        document.getElementById('activity').innerText = "Activity: " + activity;
     });
 }
 
