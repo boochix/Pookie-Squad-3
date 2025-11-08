@@ -1,0 +1,83 @@
+<script>
+const GPS_URL = "http://ipaddress:8080/gps.json"; 
+let map, polyline, speedChart;
+let gpsHistory = [];
+let speedHistory = [];
+let timeLabels = [];
+
+function haversine(lat1, lon1, lat2, lon2){
+    const R = 6371000;
+    const toRad = x => x * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+async function fetchGPS(){
+    try{
+        const response = await fetch(GPS_URL);
+        const data = await response.json();
+
+        const lat = data.gps.latitude;
+        const lon = data.gps.longitude;
+        const timestamp = new Date().toLocaleTimeString();
+
+        // Only add if different from last point to reduce noise
+        if(gpsHistory.length === 0 || lat !== gpsHistory[gpsHistory.length-1][0] || lon !== gpsHistory[gpsHistory.length-1][1]){
+            gpsHistory.push([lat, lon]);
+            timeLabels.push(timestamp);
+
+            // Calculate speed
+            if(gpsHistory.length > 1){
+                const prev = gpsHistory[gpsHistory.length - 2];
+                const dist = haversine(prev[0], prev[1], lat, lon);
+                const dt = 0.2; // 200 ms
+                speedHistory.push(dist/dt);
+            } else {
+                speedHistory.push(0);
+            }
+
+            // Limit stored points to last 200 to avoid slowdowns
+            if(gpsHistory.length > 200){
+                gpsHistory.shift();
+                timeLabels.shift();
+                speedHistory.shift();
+            }
+
+            // Map update
+            if(!map){
+                map = L.map('map').setView([lat, lon], 18);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
+                polyline = L.polyline(gpsHistory, {color:'blue'}).addTo(map);
+            } else {
+                polyline.setLatLngs(gpsHistory);
+                map.setView([lat, lon]);
+            }
+
+            // Speed chart update
+            if(!speedChart){
+                const ctx = document.getElementById('speedChart').getContext('2d');
+                speedChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: timeLabels,
+                        datasets: [{ label: 'Speed (m/s)', data: speedHistory, borderColor:'orange', fill:false }]
+                    },
+                    options: { responsive:true, animation:false, scales: { x:{title:{display:true,text:'Time'}}, y:{title:{display:true,text:'Speed (m/s)'}} } }
+                });
+            } else {
+                speedChart.data.labels = timeLabels;
+                speedChart.data.datasets[0].data = speedHistory;
+                speedChart.update();
+            }
+        }
+    } catch(err){
+        console.error("Error fetching GPS:", err);
+    }
+}
+
+// Run at 5 Hz
+fetchGPS();
+setInterval(fetchGPS, 200);
+</script>
